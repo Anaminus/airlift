@@ -85,6 +85,7 @@ func (client *Client) Login(authFile string) (err error) {
 }
 
 func (client *Client) GetAssetVersions(placeID int64, page int) (versions []AssetVersion, err error) {
+	logf("getting page %d of asset %d\n", page, placeID)
 	url := fmt.Sprintf(assetVersions, placeID, page)
 	resp, err := client.Get(url)
 	if err != nil {
@@ -101,6 +102,7 @@ func (client *Client) GetAssetVersions(placeID int64, page int) (versions []Asse
 }
 
 func (client *Client) GetAssetVersion(version AssetVersion, cb func(AssetVersion, io.Reader) error) error {
+	logf("getting version %d (vid %d)\n", version.VersionNumber, version.Id)
 	if cb == nil {
 		return errors.New("callback required")
 	}
@@ -119,43 +121,45 @@ func (client *Client) GetAssetVersion(version AssetVersion, cb func(AssetVersion
 	return nil
 }
 
-func intlen(i int) int {
-	n := 1
-	if i >= 100000000 {
-		n += 8
-		i /= 100000000
-	}
-	if i >= 10000 {
-		n += 4
-		i /= 10000
-	}
-	if i >= 100 {
-		n += 2
-		i /= 100
-	}
-	if i >= 10 {
-		n += 1
-	}
-	return n
+type Commander struct {
+	Cmd  string
+	Args []string
+	Dir  string
+	Err  func([]string, []byte, error) error
 }
 
-func gitter(repo string) (func(...string), func(string, ...string)) {
-	return func(args ...string) {
-			args = append([]string{"-C", repo}, args...)
-			b, err := exec.Command("git", args...).CombinedOutput()
-			if err != nil {
-				but.Failf("git %s\n%s\n%s", strings.Join(args, " "), string(b), err)
-			}
-		},
-		func(stdin string, args ...string) {
-			args = append([]string{"-C", repo}, args...)
-			cmd := exec.Command("git", args...)
-			cmd.Stdin = strings.NewReader(stdin)
-			b, err := cmd.CombinedOutput()
-			if err, ok := err.(*exec.ExitError); ok && err.ExitCode() != 1 {
-				but.Failf("git %s\n%s\n%s", strings.Join(args, " "), string(b), err)
-			}
-		}
+func (c *Commander) run(cmd *exec.Cmd) error {
+	b, err := cmd.CombinedOutput()
+	if err != nil && c.Err != nil {
+		return c.Err(cmd.Args, b, err)
+	}
+	return err
+}
+
+func (c *Commander) Run() error {
+	cmd := exec.Command(c.Cmd, c.Args...)
+	cmd.Dir = c.Dir
+	return c.run(cmd)
+}
+
+func (c *Commander) Pipe(r io.Reader) error {
+	cmd := exec.Command(c.Cmd, c.Args...)
+	cmd.Dir = c.Dir
+	cmd.Stdin = r
+	return c.run(cmd)
+}
+
+func (c *Commander) RunArgs(args ...string) error {
+	cmd := exec.Command(c.Cmd, args...)
+	cmd.Dir = c.Dir
+	return c.run(cmd)
+}
+
+func (c *Commander) PipeArgs(r io.Reader, args ...string) error {
+	cmd := exec.Command(c.Cmd, args...)
+	cmd.Dir = c.Dir
+	cmd.Stdin = r
+	return c.run(cmd)
 }
 
 func commitMessage(v AssetVersion, filename string) string {
@@ -182,15 +186,74 @@ func commitMessage(v AssetVersion, filename string) string {
 	)
 }
 
+func formatFilename(format string, v AssetVersion) string {
+	return fmt.Sprintf("place_v%d_id%d_vid%d.rbxl", v.VersionNumber, v.AssetId, v.Id)
+}
+
+var placeID int64
+var authFile string
+var output string
+var useGit bool
+var useTag bool
+var usePipe bool
+var filename string
+var verbose bool
+
+func log(args ...interface{}) {
+	if verbose {
+		but.Log(args...)
+	}
+}
+
+func logf(format string, args ...interface{}) {
+	if verbose {
+		but.Logf(format, args...)
+	}
+}
+
+var errContinue = errors.New("continue")
+
+func transformFile(transform *Commander, filename string, r io.Reader) error {
+	if transform == nil || !usePipe {
+		file, err := os.Create(filepath.Join(output, filename))
+		if err != nil {
+			return errors.Wrap(err, "create file")
+		}
+		if _, err := io.Copy(file, r); err != nil {
+			file.Close()
+			return errors.Wrap(err, "write file")
+		}
+		err = file.Sync()
+		file.Close()
+		if err != nil {
+			return errors.Wrap(err, "sync file")
+		}
+	}
+	if transform != nil {
+		var err error
+		if usePipe {
+			err = transform.Pipe(r)
+		} else {
+			err = transform.Run()
+		}
+		if err != nil {
+			// If the transform command fails, continue on to the next version.
+			log("transform: ", err)
+			return errContinue
+		}
+	}
+	return nil
+}
+
 func main() {
-	var placeID int64
-	var authFile string
-	var output string
-	var useGit bool
 	flag.Int64Var(&placeID, "id", -1, "ID of asset to retrieve versions of.")
 	flag.StringVar(&authFile, "auth", "", "Path to a file containing auth cookies. Prompts for login if empty.")
 	flag.StringVar(&output, "output", ".", "The directory to output to.")
-	flag.BoolVar(&useGit, "git", false, "Compile file versions into a git repository.")
+	flag.BoolVar(&useGit, "git", true, "Compile version files into a git repository.")
+	flag.BoolVar(&useTag, "tag", false, "Tag each commit with the version number.")
+	flag.BoolVar(&usePipe, "pipe", false, "Pipe version files into transform command instead of writing.")
+	flag.StringVar(&filename, "filename", "place.rbxl", "Format version file names.")
+	flag.BoolVar(&verbose, "v", false, "Verbose output.")
 	flag.Parse()
 
 	if placeID < 0 {
@@ -205,6 +268,8 @@ func main() {
 		var err error
 		output, err = os.Getwd()
 		but.IfFatal(err, "get working directory")
+	} else {
+		but.IfFatal(os.MkdirAll(output, 0755))
 	}
 
 	client := &Client{Client: &http.Client{}}
@@ -224,61 +289,63 @@ func main() {
 		return versions[i].VersionNumber < versions[j].VersionNumber
 	})
 
-	var width int
-	for _, version := range versions {
-		w := intlen(int(version.VersionNumber))
-		if w > width {
-			width = w
+	transformArgs := flag.Args()
+	var transform *Commander
+	if len(transformArgs) > 0 {
+		transform = &Commander{
+			Cmd:  transformArgs[0],
+			Args: transformArgs[1:],
+			Dir:  output,
 		}
+		logf("found transform command %q\n", transform.Cmd)
 	}
 
-	var cb func(AssetVersion, io.Reader) error
+	var callback func(AssetVersion, io.Reader) error
 	if useGit {
-		const filename = `place.rbxl`
-		git, gitin := gitter(output)
-		git("init")
-		cb = func(v AssetVersion, r io.Reader) error {
-			file, err := os.Create(filepath.Join(output, filename))
-			if err != nil {
-				return errors.Wrapf(err, "create v%d", v.VersionNumber)
-			}
-			if _, err := io.Copy(file, r); err != nil {
-				file.Close()
-				return errors.Wrapf(err, "write v%d", v.VersionNumber)
-			}
-			if err := file.Sync(); err != nil {
-				file.Close()
-				return errors.Wrapf(err, "sync v%d", v.VersionNumber)
-			}
-			file.Close()
+		log("using git")
+		git := &Commander{
+			Cmd: "git",
+			Dir: output,
+		}
 
-			git("add", filename)
-			gitin(commitMessage(v, filename), "commit",
+		but.IfFatal(git.RunArgs("init"), "initialize repository")
+		callback = func(v AssetVersion, r io.Reader) error {
+			if err := transformFile(transform, filename, r); err != nil {
+				return err
+			}
+			if err := git.RunArgs("add", filename); err != nil {
+				return err
+			}
+			commit := strings.NewReader(commitMessage(v, filename))
+			if err := git.PipeArgs(commit, "commit",
+				// Read message from stdin.
 				"-F", "-",
+				// Allow empty commits.
+				"--allow-empty",
+				// Use asset creation time for commit date.
 				"--date", strconv.FormatInt(v.Created.Unix(), 10),
+				// Spoof author.
 				"--author", "airlift <airlift>",
-			)
+			); err != nil {
+				return err
+			}
+			if useTag {
+				return git.RunArgs("tag", fmt.Sprintf("v%d", v.VersionNumber))
+			}
 			return nil
 		}
 	} else {
-		cb = func(v AssetVersion, r io.Reader) error {
-			filename := fmt.Sprintf("place_v%0*d_id%d_vid%d.rbxl", width, v.VersionNumber, v.AssetId, v.Id)
-			file, err := os.Create(filepath.Join(output, filename))
-			if err != nil {
-				return errors.Wrapf(err, "create v%d", v.VersionNumber)
-			}
-			defer file.Close()
-			if _, err := io.Copy(file, r); err != nil {
-				return errors.Wrapf(err, "write v%d", v.VersionNumber)
-			}
-			if err := file.Sync(); err != nil {
-				return errors.Wrapf(err, "sync v%d", v.VersionNumber)
-			}
-			return nil
+		callback = func(v AssetVersion, r io.Reader) error {
+			filename := formatFilename(filename, v)
+			return transformFile(transform, filename, r)
 		}
 	}
 
 	for _, version := range versions {
-		but.IfFatalf(client.GetAssetVersion(version, cb), "get asset version %d", version.Id)
+		err := client.GetAssetVersion(version, callback)
+		if err == errContinue {
+			continue
+		}
+		but.IfFatalf(err, "get asset version %d", version.VersionNumber)
 	}
 }
