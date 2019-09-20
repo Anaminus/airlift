@@ -324,8 +324,6 @@ func main() {
 				"--allow-empty",
 				// Use asset creation time for commit date.
 				"--date", strconv.FormatInt(v.Created.Unix(), 10),
-				// Spoof author.
-				"--author", "airlift <airlift>",
 			); err != nil {
 				return err
 			}
