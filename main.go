@@ -84,9 +84,9 @@ func (client *Client) Login(authFile string) (err error) {
 	return nil
 }
 
-func (client *Client) GetAssetVersions(placeID int64, page int) (versions []AssetVersion, err error) {
-	logf("getting page %d of asset %d\n", page, placeID)
-	url := fmt.Sprintf(assetVersions, placeID, page)
+func (client *Client) GetAssetVersions(assetID int64, page int) (versions []AssetVersion, err error) {
+	logf("getting page %d of asset %d\n", page, assetID)
+	url := fmt.Sprintf(assetVersions, assetID, page)
 	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err
@@ -190,7 +190,7 @@ func formatFilename(format string, v AssetVersion) string {
 	return fmt.Sprintf("place_v%d_id%d_vid%d.rbxl", v.VersionNumber, v.AssetId, v.Id)
 }
 
-var placeID int64
+var assetID int64
 var authFile string
 var output string
 var useGit bool
@@ -246,17 +246,17 @@ func transformFile(transform *Commander, filename string, r io.Reader) error {
 }
 
 func main() {
-	flag.Int64Var(&placeID, "id", -1, "ID of asset to retrieve versions of.")
+	flag.Int64Var(&assetID, "id", -1, "ID of asset to retrieve versions of.")
 	flag.StringVar(&authFile, "auth", "", "Path to a file containing auth cookies. Prompts for login if empty.")
 	flag.StringVar(&output, "output", ".", "The directory to output to.")
 	flag.BoolVar(&useGit, "git", true, "Compile version files into a git repository.")
 	flag.BoolVar(&useTag, "tag", false, "Tag each commit with the version number.")
 	flag.BoolVar(&usePipe, "pipe", false, "Pipe version files into transform command instead of writing.")
-	flag.StringVar(&filename, "filename", "place.rbxl", "Format version file names.")
+	flag.StringVar(&filename, "filename", "asset.rbxl", "Format version file names.")
 	flag.BoolVar(&verbose, "v", false, "Verbose output.")
 	flag.Parse()
 
-	if placeID < 0 {
+	if assetID < 0 {
 		but.Fail("must specify -id flag")
 	}
 
@@ -277,11 +277,11 @@ func main() {
 
 	var versions []AssetVersion
 	for page := 1; ; page++ {
-		v, err := client.GetAssetVersions(placeID, page)
+		v, err := client.GetAssetVersions(assetID, page)
 		if len(v) == 0 {
 			break
 		}
-		but.IfFatalf(err, "get versions of %d (page %d)", placeID, page)
+		but.IfFatalf(err, "get versions of %d (page %d)", assetID, page)
 		versions = append(versions, v...)
 	}
 
