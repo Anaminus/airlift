@@ -225,8 +225,7 @@ func formatFilename(format string, v AssetVersion) string {
 				continue
 			}
 			for ; j < len(format); j++ {
-				if c := format[j]; c == '_' ||
-					'0' <= c && c <= '9' ||
+				if c := format[j]; '0' <= c && c <= '9' ||
 					'a' <= c && c <= 'z' ||
 					'A' <= c && c <= 'Z' {
 					continue
