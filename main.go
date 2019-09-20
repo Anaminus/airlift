@@ -186,8 +186,63 @@ func commitMessage(v AssetVersion, filename string) string {
 	)
 }
 
+func selectVersionField(v AssetVersion, field string) string {
+	switch strings.ToLower(field) {
+	case "id", "vid":
+		return strconv.FormatInt(v.Id, 10)
+	case "assetid", "aid":
+		return strconv.FormatInt(v.AssetId, 10)
+	case "versionnumber", "v":
+		return strconv.FormatInt(v.VersionNumber, 10)
+	case "parentassetversionid", "pid":
+		return strconv.FormatInt(v.ParentAssetVersionId, 10)
+	case "creatortype", "ct":
+		return strconv.FormatInt(int64(v.CreatorType), 10)
+	case "creatortargetid", "cid":
+		return strconv.FormatInt(v.CreatorTargetId, 10)
+	case "creatinguniverseid":
+		if v.CreatingUniverseId != nil {
+			return strconv.FormatInt(*v.CreatingUniverseId, 10)
+		}
+	case "created", "t":
+		return v.Created.UTC().Format("2006-01-02-15-04-05")
+	case "updated", "u":
+		return v.Updated.UTC().Format("2006-01-02-15-04-05")
+	}
+	return ""
+}
+
 func formatFilename(format string, v AssetVersion) string {
-	return fmt.Sprintf("place_v%d_id%d_vid%d.rbxl", v.VersionNumber, v.AssetId, v.Id)
+	var buf strings.Builder
+	i := 0
+	for j := 0; j < len(format); j++ {
+		if format[j] == '%' && j+1 < len(format) {
+			buf.WriteString(format[i:j])
+			j++
+			i = j
+			if format[j] == '%' {
+				// buf.WriteByte(format[j])
+				continue
+			}
+			for ; j < len(format); j++ {
+				if c := format[j]; c == '_' ||
+					'0' <= c && c <= '9' ||
+					'a' <= c && c <= 'z' ||
+					'A' <= c && c <= 'Z' {
+					continue
+				}
+				break
+			}
+			if j == i {
+				buf.WriteByte(format[i-1])
+			} else {
+				buf.WriteString(selectVersionField(v, format[i:j]))
+			}
+			i = j
+		}
+	}
+	buf.WriteString(format[i:])
+	return buf.String()
 }
 
 var assetID int64
@@ -333,9 +388,23 @@ func main() {
 			return nil
 		}
 	} else {
+		log("using file list")
+		// Check whether format will produce unique filenames.
+		ta := time.Now()
+		tb := ta.AddDate(0, 0, 1)
+		a := formatFilename(filename, AssetVersion{0, 0, 0, 0, 0, 0, nil, ta, ta})
+		b := formatFilename(filename, AssetVersion{1, 0, 1, 0, 0, 0, nil, tb, tb})
+		if a == b {
+			logf("filename %q not unique\n", filename)
+			// If not, append the version number.
+			ext := filepath.Ext(filename)
+			filename = filename[:len(filename)-len(ext)] + "_v%v" + ext
+			logf("using %q as filename\n", filename)
+		} else {
+			logf("filename %q is unique\n", filename)
+		}
 		callback = func(v AssetVersion, r io.Reader) error {
-			filename := formatFilename(filename, v)
-			return transformFile(transform, filename, r)
+			return transformFile(transform, formatFilename(filename, v), r)
 		}
 	}
 

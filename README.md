@@ -13,8 +13,7 @@ Versions can optionally be written as a Git repository.
   headers. If unspecified, the program will prompt the user to log in.
 - `-output PATH` is the directory to which files will be written. Defaults to
   the working directory.
-- `filename FORMAT` formats the name of the place file. Currently, this is
-  ignored when `-git` is disabled.
+- `filename FORMAT` formats the name of written version files.
 - `-git` causes files to be written to a Git repository. Each version is written
   as a commit.
 - `-tag` causes each written commit to be tagged with the version number.
@@ -28,6 +27,28 @@ be used to transform files. This command runs with `-output` as the working
 directory, and runs after each version is downloaded. If the command fails, then
 that version is skipped. If `-git` is enabled, then the entire working tree is
 committed after the command succeeds.
+
+The `-filename` format may contain variables of the form `%VARIABLE` that expand
+based on data from the version currently being processed. `%%` emits a literal
+`%` character, and an unknown variable emits an empty string. Variables are
+case-insensitive.
+
+Variable               | Alias | Description
+-----------------------|-------|------------
+`Id`                   | `vid` | Asset version ID.
+`AssetId`              | `aid` | Asset ID.
+`VersionNumber`        | `v`   | Current version number.
+`ParentAssetVersionId` | `pid` | Asset version ID of the parent or previous version.
+`CreatorTargetId`      | `cid` | ID of the asset creator.
+`CreatorType`          | `ct`  | Number indicating the creator type.
+`CreatingUniverseId`   |       | Universe ID, if present.
+`Created`              | `t`   | When the version was created.
+`Updated`              | `u`   | When the version was last updated.
+
+When `-git` is disabled, `-filename` must produce names that are unique per
+version. If not, `_v%VersionNumber` is appended to the filename, before the
+extension. Using any of the `Id`, `VersionNumber`, `Created`, or `Updated`
+variables will produce unique names.
 
 ## Installation
 
