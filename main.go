@@ -2,10 +2,10 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"github.com/anaminus/but"
 	"github.com/anaminus/rbxauth"
+	"github.com/jessevdk/go-flags"
 	"github.com/pkg/errors"
 	"io"
 	"net/http"
@@ -244,23 +244,112 @@ func formatFilename(format string, v AssetVersion) string {
 	return buf.String()
 }
 
-var assetID int64
-var authFile string
-var output string
-var useGit bool
-var useTag bool
-var usePipe bool
-var filename string
-var verbose bool
+const Usage = `-i ASSET [options] [transform [args...]]
+
+Downloads versions of Roblox assets to a Git repository.
+
+Any unprocessed arguments are interpreted as a command with arguments, which can
+be used to transform files. This command runs with --output as the working
+directory, and runs after each version is downloaded. If the command fails, then
+that version is skipped. If --git is enabled, then the entire working tree is
+committed after the command succeeds.
+
+The --filename format may contain variables of the form %VARIABLE that expand
+based on data from the version currently being processed. %% emits a literal %
+character, and unknown variables emit empty strings. Variables are
+case-insensitive.
+
+  Variable              Alias  Description
+  ------------------------------------------------------------------
+  Id                    vid    Asset version ID.
+  AssetId               aid    Asset ID.
+  VersionNumber         v      Current version number.
+  ParentAssetVersionId  pid    ID of the parent or previous version.
+  CreatorTargetId       cid    ID of the asset creator.
+  CreatorType           ct     Number indicating the creator type.
+  CreatingUniverseId           Universe ID, if present.
+  Created               t      When the version was created.
+  Updated               u      When the version was last updated.
+
+When --git is disabled, the format must produce names that are unique per
+version. If not, "_v%VersionNumber" is appended to the filename, before the file
+extension. Using any of the Id, VersionNumber, Created, or Updated variables
+will produce unique names.`
+
+var Options = struct {
+	AssetID  int64  `long:"id" short:"i"`
+	AuthFile string `long:"auth" short:"a"`
+	Output   string `long:"output" short:"o"`
+	Filename string `long:"filename" short:"f"`
+	Git      bool   `long:"git"`
+	Tag      bool   `long:"tag"`
+	Pipe     bool   `long:"pipe"`
+	Verbose  bool   `long:"verbose" short:"v"`
+}{0, "", "", "asset.rbxl", true, false, false, false}
+
+var optionData = map[string]*flags.Option{
+	"id": &flags.Option{
+		Description: `ID of asset to retrieve versions of.`,
+		ValueName:   "INTEGER",
+		Required:    false,
+	},
+	"auth": &flags.Option{
+		Description: "Path to a file containing authentication " +
+			"(.ROBLOSECURITY) cookies. The file is formatted as a number of " +
+			"'Set-Cookie' HTTP headers. Prompts the user to login if " +
+			"unspecified.",
+		ValueName: "PATH",
+	},
+	"output": &flags.Option{
+		Description: "The directory to which files will be written. Defaults " +
+			"to the working directory.",
+		ValueName: "PATH",
+	},
+	"filename": &flags.Option{
+		Description: "Format the name of written version files.",
+		ValueName:   "FORMAT",
+		Default:     []string{"asset.rbxl"},
+	},
+	"git": &flags.Option{
+		Description: "Compile version files into a git repository. Set " +
+			"--git=false to disable.",
+		Default: []string{"true"},
+	},
+	"tag": &flags.Option{
+		Description: "Tag each commit with the version number.",
+		Default:     []string{"false"},
+	},
+	"pipe": &flags.Option{
+		Description: "Pipe version files into transform command instead of " +
+			"writing.",
+		Default: []string{"false"},
+	},
+	"verbose": &flags.Option{
+		Description: "Verbose logging.",
+	},
+}
+
+func ParseOptions(data interface{}, opts flags.Options) *flags.Parser {
+	fp := flags.NewParser(data, opts)
+	for name, info := range optionData {
+		opt := fp.FindOptionByLongName(name)
+		if opt == nil {
+			continue
+		}
+		opt.Description = info.Description
+		opt.ValueName = info.ValueName
+	}
+	return fp
+}
 
 func log(args ...interface{}) {
-	if verbose {
+	if Options.Verbose {
 		but.Log(args...)
 	}
 }
 
 func logf(format string, args ...interface{}) {
-	if verbose {
+	if Options.Verbose {
 		but.Logf(format, args...)
 	}
 }
@@ -268,8 +357,8 @@ func logf(format string, args ...interface{}) {
 var errContinue = errors.New("continue")
 
 func transformFile(transform *Commander, filename string, r io.Reader) error {
-	if transform == nil || !usePipe {
-		file, err := os.Create(filepath.Join(output, filename))
+	if transform == nil || !Options.Pipe {
+		file, err := os.Create(filepath.Join(Options.Output, filename))
 		if err != nil {
 			return errors.Wrap(err, "create file")
 		}
@@ -285,7 +374,7 @@ func transformFile(transform *Commander, filename string, r io.Reader) error {
 	}
 	if transform != nil {
 		var err error
-		if usePipe {
+		if Options.Pipe {
 			err = transform.Pipe(r)
 		} else {
 			err = transform.Run()
@@ -300,42 +389,41 @@ func transformFile(transform *Commander, filename string, r io.Reader) error {
 }
 
 func main() {
-	flag.Int64Var(&assetID, "id", -1, "ID of asset to retrieve versions of.")
-	flag.StringVar(&authFile, "auth", "", "Path to a file containing auth cookies. Prompts for login if empty.")
-	flag.StringVar(&output, "output", ".", "The directory to output to.")
-	flag.BoolVar(&useGit, "git", true, "Compile version files into a git repository.")
-	flag.BoolVar(&useTag, "tag", false, "Tag each commit with the version number.")
-	flag.BoolVar(&usePipe, "pipe", false, "Pipe version files into transform command instead of writing.")
-	flag.StringVar(&filename, "filename", "asset.rbxl", "Format version file names.")
-	flag.BoolVar(&verbose, "v", false, "Verbose output.")
-	flag.Parse()
-
-	if assetID < 0 {
-		but.Fail("must specify -id flag")
+	fp := ParseOptions(&Options, flags.Default|flags.PassAfterNonOption)
+	fp.Usage = Usage
+	transformArgs, err := fp.Parse()
+	if err != nil {
+		return
 	}
 
-	if useGit && findGit() == "" {
+	if Options.AssetID <= 0 {
+		but.Log("must specify --id flag")
+		fp.WriteHelp(os.Stderr)
+		return
+	}
+
+	if Options.Git && findGit() == "" {
 		but.Fail("git not installed")
 	}
 
-	if output == "" || output == "." {
+	if Options.Output == "" || Options.Output == "." {
 		var err error
-		output, err = os.Getwd()
+		Options.Output, err = os.Getwd()
 		but.IfFatal(err, "get working directory")
 	} else {
-		but.IfFatal(os.MkdirAll(output, 0755))
+		but.IfFatal(os.MkdirAll(Options.Output, 0755))
 	}
 
 	client := &Client{Client: &http.Client{}}
-	but.IfFatal(client.Login(authFile), "login")
+	but.IfFatal(client.Login(Options.AuthFile), "login")
 
 	var versions []AssetVersion
 	for page := 1; ; page++ {
-		v, err := client.GetAssetVersions(assetID, page)
+		v, err := client.GetAssetVersions(Options.AssetID, page)
 		if len(v) == 0 {
 			break
 		}
-		but.IfFatalf(err, "get versions of %d (page %d)", assetID, page)
+		but.IfFatalf(err, "get versions of %d (page %d)", Options.AssetID, page)
 		versions = append(versions, v...)
 	}
 
@@ -343,34 +431,33 @@ func main() {
 		return versions[i].VersionNumber < versions[j].VersionNumber
 	})
 
-	transformArgs := flag.Args()
 	var transform *Commander
 	if len(transformArgs) > 0 {
 		transform = &Commander{
 			Cmd:  transformArgs[0],
 			Args: transformArgs[1:],
-			Dir:  output,
+			Dir:  Options.Output,
 		}
 		logf("found transform command %q\n", transform.Cmd)
 	}
 
 	var callback func(AssetVersion, io.Reader) error
-	if useGit {
+	if Options.Git {
 		log("using git")
 		git := &Commander{
 			Cmd: "git",
-			Dir: output,
+			Dir: Options.Output,
 		}
 
 		but.IfFatal(git.RunArgs("init"), "initialize repository")
 		callback = func(v AssetVersion, r io.Reader) error {
-			if err := transformFile(transform, filename, r); err != nil {
+			if err := transformFile(transform, Options.Filename, r); err != nil {
 				return err
 			}
-			if err := git.RunArgs("add", filename); err != nil {
+			if err := git.RunArgs("add", Options.Filename); err != nil {
 				return err
 			}
-			commit := strings.NewReader(commitMessage(v, filename))
+			commit := strings.NewReader(commitMessage(v, Options.Filename))
 			if err := git.PipeArgs(commit, "commit",
 				// Read message from stdin.
 				"-F", "-",
@@ -381,7 +468,7 @@ func main() {
 			); err != nil {
 				return err
 			}
-			if useTag {
+			if Options.Tag {
 				return git.RunArgs("tag", fmt.Sprintf("v%d", v.VersionNumber))
 			}
 			return nil
@@ -389,6 +476,7 @@ func main() {
 	} else {
 		log("using file list")
 		// Check whether format will produce unique filenames.
+		filename := Options.Filename
 		ta := time.Now()
 		tb := ta.AddDate(0, 0, 1)
 		a := formatFilename(filename, AssetVersion{0, 0, 0, 0, 0, 0, nil, ta, ta})
