@@ -2,11 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/anaminus/but"
-	"github.com/anaminus/rbxauth"
-	"github.com/jessevdk/go-flags"
-	"github.com/pkg/errors"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -18,6 +15,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/anaminus/but"
+	"github.com/anaminus/rbxauth"
+	"github.com/jessevdk/go-flags"
 )
 
 func findCookie(cookies []*http.Cookie, name string) *http.Cookie {
@@ -53,30 +54,78 @@ type AssetVersion struct {
 	Updated              time.Time
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
+type StatusError interface {
+	StatusCode() int
+}
+
+// statusError represents an error derived from the status code of an HTTP
+// response. It also wraps an API error response.
+type statusError struct {
+	code int
+	resp error
+}
+
+// Error implements the error interface.
+func (err statusError) Error() string {
+	if err.resp == nil {
+		return "http " + strconv.Itoa(err.code) + ": " + http.StatusText(err.code)
+	}
+	return "http " + strconv.Itoa(err.code) + ": " + err.resp.Error()
+}
+
+// Unwrap implements the Unwrap interface.
+func (err statusError) Unwrap() error {
+	return err.resp
+}
+
+// StatusCode returns the status code of the error.
+func (err statusError) StatusCode() int {
+	return err.code
+}
+
+// if Status wraps err in a statusError if code is not 2XX, and returns err
+// otherwise.
+func ifStatus(code int, err error) error {
+	if code < 200 || code >= 300 {
+		return &statusError{code: code, resp: err}
+	}
+	return err
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 type Client struct {
 	*http.Client
 }
 
 func (client *Client) Login(authFile string) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("login: %w", err)
+		}
+	}()
+
 	var session []*http.Cookie
 	if authFile == "" {
-		config := rbxauth.Config{}
-		if _, session, err = config.Prompt(""); err != nil {
-			return errors.Wrap(err, "prompt")
+		stream := rbxauth.StandardStream()
+		if _, session, err = stream.Prompt(""); err != nil {
+			return err
 		}
 	} else {
 		file, err := os.Open(authFile)
 		if err != nil {
-			return errors.Wrap(err, "open auth file")
+			return fmt.Errorf("auth file: %w", err)
 		}
 		session, err = rbxauth.ReadCookies(file)
 		file.Close()
 		if err != nil {
-			errors.Wrap(err, "read auth file")
+			return fmt.Errorf("auth file: %w", err)
 		}
 	}
 	if findCookie(session, ".ROBLOSECURITY") == nil {
-		return errors.New("session cookie not found")
+		return errors.New("missing session cookie")
 	}
 	u, err := url.Parse(cookieDomain)
 	client.Jar, _ = cookiejar.New(nil)
@@ -85,6 +134,11 @@ func (client *Client) Login(authFile string) (err error) {
 }
 
 func (client *Client) GetAssetVersions(assetID int64, page int) (versions []AssetVersion, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("get versions of asset %d (page %d): %w", assetID, page, err)
+		}
+	}()
 	logf("getting page %d of asset %d\n", page, assetID)
 	url := fmt.Sprintf(assetVersions, assetID, page)
 	resp, err := client.Get(url)
@@ -92,8 +146,8 @@ func (client *Client) GetAssetVersions(assetID int64, page int) (versions []Asse
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, errors.New(resp.Status)
+	if err := ifStatus(resp.StatusCode, nil); err != nil {
+		return nil, err
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&versions); err != nil {
 		return nil, err
@@ -104,7 +158,7 @@ func (client *Client) GetAssetVersions(assetID int64, page int) (versions []Asse
 func (client *Client) GetAssetVersion(version AssetVersion, cb func(AssetVersion, io.Reader) error) error {
 	logf("getting version %d (vid %d)\n", version.VersionNumber, version.Id)
 	if cb == nil {
-		return errors.New("callback required")
+		return errors.New("missing callback")
 	}
 	url := fmt.Sprintf(assetVersion, version.Id)
 	resp, err := client.Get(url)
@@ -112,14 +166,16 @@ func (client *Client) GetAssetVersion(version AssetVersion, cb func(AssetVersion
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return errors.New(resp.Status)
+	if err := ifStatus(resp.StatusCode, nil); err != nil {
+		return err
 	}
 	if err := cb(version, resp.Body); err != nil {
-		return errors.Wrap(err, "callback")
+		return fmt.Errorf("callback: %w", err)
 	}
 	return nil
 }
+
+////////////////////////////////////////////////////////////////////////////////
 
 type Commander struct {
 	Cmd  string
@@ -161,6 +217,8 @@ func (c *Commander) PipeArgs(r io.Reader, args ...string) error {
 	cmd.Stdin = r
 	return c.run(cmd)
 }
+
+////////////////////////////////////////////////////////////////////////////////
 
 func commitMessage(v AssetVersion, filename string) string {
 	const format = "Update %s to version %d\n\n" +
@@ -243,6 +301,8 @@ func formatFilename(format string, v AssetVersion) string {
 	buf.WriteString(format[i:])
 	return buf.String()
 }
+
+////////////////////////////////////////////////////////////////////////////////
 
 const Usage = `-i ASSET [options] [transform [args...]]
 
@@ -342,6 +402,8 @@ func ParseOptions(data interface{}, opts flags.Options) *flags.Parser {
 	return fp
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
 func log(args ...interface{}) {
 	if Options.Verbose {
 		but.Log(args...)
@@ -360,16 +422,16 @@ func transformFile(transform *Commander, filename string, r io.Reader) error {
 	if transform == nil || !Options.Pipe {
 		file, err := os.Create(filepath.Join(Options.Output, filename))
 		if err != nil {
-			return errors.Wrap(err, "create file")
+			return fmt.Errorf("create file: %w", err)
 		}
 		if _, err := io.Copy(file, r); err != nil {
 			file.Close()
-			return errors.Wrap(err, "write file")
+			return fmt.Errorf("write file: %w", err)
 		}
 		err = file.Sync()
 		file.Close()
 		if err != nil {
-			return errors.Wrap(err, "sync file")
+			return fmt.Errorf("sync file: %w", err)
 		}
 	}
 	if transform != nil {
@@ -388,6 +450,8 @@ func transformFile(transform *Commander, filename string, r io.Reader) error {
 	return nil
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
 func main() {
 	fp := ParseOptions(&Options, flags.Default|flags.PassAfterNonOption)
 	fp.Usage = Usage
@@ -403,7 +467,7 @@ func main() {
 	}
 
 	if Options.Git && findGit() == "" {
-		but.Fail("git not installed")
+		but.Fatal("git not installed")
 	}
 
 	if Options.Output == "" || Options.Output == "." {
@@ -414,17 +478,24 @@ func main() {
 		but.IfFatal(os.MkdirAll(Options.Output, 0755))
 	}
 
-	client := &Client{Client: &http.Client{}}
-	but.IfFatal(client.Login(Options.AuthFile), "login")
-
 	var versions []AssetVersion
-	for page := 1; ; page++ {
+	client := &Client{Client: &http.Client{}}
+	for page, authed := 1, false; ; {
 		v, err := client.GetAssetVersions(Options.AssetID, page)
+		if err != nil && !authed {
+			if status := StatusError(nil); errors.As(err, &status) && status.StatusCode() == 403 {
+				// Get without auth failed; retry with.
+				but.IfFatal(client.Login(Options.AuthFile))
+				authed = true
+				continue
+			}
+		}
+		but.IfFatal(err)
 		if len(v) == 0 {
 			break
 		}
-		but.IfFatalf(err, "get versions of %d (page %d)", Options.AssetID, page)
 		versions = append(versions, v...)
+		page++
 	}
 
 	sort.Slice(versions, func(i, j int) bool {
