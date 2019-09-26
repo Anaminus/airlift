@@ -13,7 +13,7 @@ Git repository.
   headers. If unspecified, the program will prompt the user to log in.
 - `--output PATH` is the directory to which files will be written. Defaults to
   the working directory.
-- `filename FORMAT` formats the name of written version files.
+- `--filename FORMAT` formats the name of written version files.
 - `--git` causes files to be written to a Git repository. Each version is written
   as a commit.
 - `--tag` causes each written commit to be tagged with the version number.
